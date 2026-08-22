@@ -48,15 +48,46 @@ function Show-Error([string]$msg) {
 }
 
 # --- 探测端口: 返回 @{status='dsh'|'busy'|'free'; url=...} ---
+# 两段式: 先 TCP 直连(400ms, 不经任何代理), 连上后再用免代理 HTTP 判定是否 DSH。
+# 不用 Invoke-WebRequest: 它可能走系统代理(如 Clash), 探测死端口要等 2 秒。
 function Probe-Port([int]$port) {
     $url = "http://127.0.0.1:{0}" -f $port
+    $client = New-Object System.Net.Sockets.TcpClient
+    $connected = $false
+    try { $connected = $client.ConnectAsync("127.0.0.1", $port).Wait(400) } catch { $connected = $false }
+    try { $client.Close() } catch {}
+    if (-not $connected) { return @{ status = "free"; url = $url } }
     try {
-        $resp = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 2
-        if ($resp.Content -match "__DSH_BOOT__") { return @{ status = "dsh";  url = $url } }
+        $req = [System.Net.HttpWebRequest]::Create($url)
+        $req.Proxy = $null
+        $req.Timeout = 2000
+        $req.ReadWriteTimeout = 2000
+        $resp = $req.GetResponse()
+        $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $body = $sr.ReadToEnd()
+        $sr.Close(); $resp.Close()
+        if ($body -match "__DSH_BOOT__") { return @{ status = "dsh";  url = $url } }
         return @{ status = "busy"; url = $url }
     } catch {
-        return @{ status = "free"; url = $url }
+        # TCP 能连但 HTTP 无响应: 多半是转发器/非 HTTP 服务占用
+        return @{ status = "busy"; url = $url }
     }
+}
+
+# --- 列出 portproxy 中 0.0.0.0 通配监听的端口 ---
+# 通配监听会导致 dsh 无法绑定该端口（进程拉起约 9 秒后以退出码 1 失败），
+# 启动前先识别并跳过，避免每个被挡端口白等一次
+function Get-PortProxyWildcardPorts {
+    try {
+        $out = @(netsh interface portproxy show v4tov4 2>$null)
+        $ports = @()
+        foreach ($l in $out) {
+            if ($l -match "^\s*(\d+\.\d+\.\d+\.\d+)\s+(\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+)\s*$") {
+                if ($Matches[1] -eq "0.0.0.0") { $ports += [int]$Matches[2] }
+            }
+        }
+        return ,$ports
+    } catch { return ,@() }
 }
 
 # --- 解析 dsh 启动方式（避免依赖 PATH 失效） ---
@@ -117,20 +148,36 @@ foreach ($port in $Ports) {
     }
 
     Write-Log ("port " + $port + ": 空闲，后台启动 dsh web ...")
+    if ((Get-PortProxyWildcardPorts) -contains $port) {
+        Write-Log ("port " + $port + ": 被 portproxy 0.0.0.0 通配监听挡住，dsh 绑定必失败，直接跳过（请重新运行 手机访问.bat 重建转发规则）")
+        continue
+    }
     $launch = Resolve-DshLaunch
     if (-not $launch) {
         Show-Error "找不到 dsh 命令。请先安装 DeepSeek Harness，并确保 dsh 在 PATH 中。"
     }
 
+    # 手机访问：若存在可信主机记录（由 手机访问.bat / lan-access.ps1 写入），
+    # 为服务附加 --trusted-host，否则局域网访问会被信任围栏 403 拒绝
+    $trustArgs = @()
+    $lanTrustFile = Join-Path $env:LOCALAPPDATA "DSHDesktop\lan-trust.txt"
+    if (Test-Path $lanTrustFile) {
+        foreach ($line in (Get-Content $lanTrustFile -ErrorAction SilentlyContinue)) {
+            $ip = $line.Trim()
+            if ($ip) { $trustArgs += @("--trusted-host", "$ip`:$port", "--trusted-host", $ip) }
+        }
+        if ($trustArgs.Count -gt 0) { Write-Log ("已附带可信主机: " + ((Get-Content $lanTrustFile | ForEach-Object { $_.Trim() }) -join ", ")) }
+    }
+
     if ($launch.kind -eq "node") {
-        $argsList = @($launch.js, "web", "--no-open", "--port", "$port")
+        $argsList = @($launch.js, "web", "--no-open", "--port", "$port") + $trustArgs
         $proc = Start-Process -FilePath $launch.node -ArgumentList $argsList `
             -WindowStyle Hidden -WorkingDirectory $WorkingDir `
             -RedirectStandardOutput (Join-Path $LogDir ("server-" + $port + ".out.log")) `
             -RedirectStandardError  (Join-Path $LogDir ("server-" + $port + ".err.log")) `
             -PassThru
     } else {
-        $argsList = @("web", "--no-open", "--port", "$port")
+        $argsList = @("web", "--no-open", "--port", "$port") + $trustArgs
         $proc = Start-Process -FilePath $launch.file -ArgumentList $argsList `
             -WindowStyle Hidden -WorkingDirectory $WorkingDir -PassThru
     }
@@ -138,11 +185,12 @@ foreach ($port in $Ports) {
 
     $deadline = (Get-Date).AddSeconds(90)
     $ok = $false
+    $busyNoted = $false
     while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 1000
+        Start-Sleep -Milliseconds 250
         $p = Probe-Port $port
         if ($p.status -eq "dsh") { $ok = $true; $targetUrl = $p.url; break }
-        if ($p.status -eq "busy") { Write-Log ("port " + $port + ": 启动期间被其他进程占用"); break }
+        if ($p.status -eq "busy" -and -not $busyNoted) { $busyNoted = $true; Write-Log ("port " + $port + ": TCP 已连通但服务未就绪，继续等待 ...") }
         if ($proc.HasExited) { Write-Log ("dsh web 进程提前退出，退出码 " + $proc.ExitCode); break }
     }
     if ($ok) {
