@@ -31,6 +31,10 @@ $iconsDir  = Join-Path $scriptDir "icons"
 $stateFile = Join-Path $scriptDir "active-icon.txt"
 $renderTmp = Join-Path $env:TEMP "dsh-icon-switch"
 
+# 快捷方式写入统一走共享库 shortcut-lib.ps1（与创建/自愈同一份实现，
+# 默认保持「指向入口 bat」的防杀软形态，仅覆盖图标）
+. (Join-Path $scriptDir "shortcut-lib.ps1")
+
 # 【补丁 A】渲染 SVG 用的浏览器：多候选自动探测（Chrome → Edge → PATH），跨机器不写死路径
 function Resolve-HeadlessBrowser {
     foreach ($p in @(
@@ -228,16 +232,8 @@ function New-MultiSizeIco([string]$srcPng, [string]$outIco) {
 # ---------------- 应用到两个独立目标 ----------------
 
 function Update-Shortcut([string]$iconFile) {
-    $shell = New-Object -ComObject WScript.Shell
-    $desktop = [Environment]::GetFolderPath("Desktop")
-    $lnkPath = Join-Path $desktop "DSH 桌面版.lnk"
-    $sc = $shell.CreateShortcut($lnkPath)
-    $sc.TargetPath = "powershell.exe"
-    $sc.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$(Join-Path $scriptDir 'start-dsh-desktop.ps1')`""
-    $sc.WorkingDirectory = $scriptDir
-    $sc.Description = "一键启动 DeepSeek Harness 桌面版（Chrome 独立窗口）"
-    $sc.IconLocation = "$iconFile,0"
-    $sc.Save()
+    # 委托共享库写入（保持防杀软 bat 形态），仅覆盖图标
+    New-DshShortcut -ShortcutName "DSH 桌面版" -IconFile $iconFile | Out-Null
 }
 
 function Update-Favicon($dist, $source) {

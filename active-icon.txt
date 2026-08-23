@@ -1,2 +1,1 @@
-shortcut=deepseek-diy
-taskbar=deepseek-black
+shortcut=deepseek-diy taskbar=

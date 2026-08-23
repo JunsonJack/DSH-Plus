@@ -1,7 +1,7 @@
 # DSH 桌面版 — 设计与操作文档
 
 > **项目路径**：`dsh-desktop/`
-> **文档版本**：v1.0
+> **文档版本**：v1.1（2026-08-23：快捷方式防杀软形态 + 登录自愈任务）
 > **适用平台**：Windows 10/11（依赖 PowerShell 5.1+、Chrome 或 Edge）
 > **一句话定位**：把 DSH Web GUI 包装成"原生桌面应用"体验的一键启动器 + 图标个性化工具集。
 
@@ -16,6 +16,7 @@
 - [5. 日志与故障排查](#5-日志与故障排查)
 - [6. 恢复与卸载](#6-恢复与卸载)
 - [7. 附录](#7-附录)
+- [8. 环境自检](#8-环境自检)
 
 ---
 
@@ -31,8 +32,9 @@ DeepSeek Harness（DSH）的图形界面是一个运行在 `127.0.0.1:3080` 的 
 |---|---|---|
 | 一键启动 | 探测服务 → 按需后台拉起 `dsh web` → 打开 App 窗口 | `DSH桌面版.bat` |
 | 一键关闭 | 仅停止由本启动器拉起的服务进程树，绝不误杀 | `关闭DSH桌面版.bat` |
-| 创建快捷方式 | 在桌面生成隐藏控制台的启动快捷方式 | `创建桌面快捷方式.bat` |
+| 创建快捷方式 | 在桌面生成防杀软形态的启动快捷方式 | `创建桌面快捷方式.bat` |
 | 图标切换 | 桌面快捷方式图标与任务栏/窗口图标**可分别设置** | `切换DSH图标.bat` |
+| 快捷方式自愈 | 登录后自动检测并重建丢失/损坏的桌面快捷方式 | `安装自愈任务.bat` |
 
 ---
 
@@ -44,12 +46,17 @@ DeepSeek Harness（DSH）的图形界面是一个运行在 `127.0.0.1:3080` 的 
 dsh-desktop/
 ├── DSH桌面版.bat                  # 入口：一键启动（双击即用）
 ├── 关闭DSH桌面版.bat              # 入口：一键关闭
-├── 创建桌面快捷方式.bat            # 入口：生成桌面快捷方式（一次性）
+├── 创建桌面快捷方式.bat            # 入口：生成桌面快捷方式（幂等，可重复执行）
 ├── 切换DSH图标.bat                # 入口：交互式图标切换菜单
+├── 安装自愈任务.bat               # 入口：注册登录自愈计划任务
+├── 卸载自愈任务.bat               # 入口：删除登录自愈计划任务
 │
 ├── start-dsh-desktop.ps1          # 核心：启动器（探测/拉起服务/开窗）
 ├── stop-dsh-desktop.ps1           # 核心：停止器（安全结束服务进程树）
-├── create-desktop-shortcut.ps1    # 核心：快捷方式创建
+├── shortcut-lib.ps1               # 核心：快捷方式写入/体检共享库（唯一实现）
+├── create-desktop-shortcut.ps1    # 核心：快捷方式创建（薄封装，防杀软形态）
+├── selfheal-shortcut.ps1          # 核心：自愈体检与重建（计划任务调用）
+├── install-selfheal-task.ps1      # 核心：自愈计划任务注册/卸载
 ├── switch-dsh-icon.ps1            # 核心：双目标图标切换器
 │
 ├── icons/                         # 图标库（用户资产，可自由增删）
@@ -70,10 +77,12 @@ dsh-desktop/
 
 | 文件 | 调用目标 | 窗口行为 | 典型场景 |
 |---|---|---|---|
-| `DSH桌面版.bat` | `start-dsh-desktop.ps1` | 完全隐藏 | 日常启动 |
+| `DSH桌面版.bat` | `start-dsh-desktop.ps1` | 最小化闪现后隐藏 | 日常启动 |
 | `关闭DSH桌面版.bat` | `stop-dsh-desktop.ps1` | 显示 + pause | 用完关闭服务 |
-| `创建桌面快捷方式.bat` | `create-desktop-shortcut.ps1` | 显示 + pause | 初始化时执行一次 |
+| `创建桌面快捷方式.bat` | `create-desktop-shortcut.ps1` | 显示 + pause | 初始化/修复时执行 |
 | `切换DSH图标.bat` | `switch-dsh-icon.ps1` | 显示 + pause | 更换图标 |
+| `安装自愈任务.bat` | `install-selfheal-task.ps1` | 显示 + pause | 注册登录自愈任务 |
+| `卸载自愈任务.bat` | `install-selfheal-task.ps1 -Remove` | 显示 + pause | 移除自愈任务 |
 
 #### 核心逻辑层（PowerShell）
 
@@ -81,8 +90,11 @@ dsh-desktop/
 |---|---|---|
 | `start-dsh-desktop.ps1` | ~207 | 端口探测、dsh 启动方式解析、服务就绪等待、浏览器定位、App 窗口管理 |
 | `stop-dsh-desktop.ps1` | ~37 | PID 记录校验、进程树收集、逆序安全终止 |
-| `create-desktop-shortcut.ps1` | ~49 | 快捷方式创建与图标解析（幂等） |
-| `switch-dsh-icon.ps1` | ~411 | SVG 渲染、多尺寸 ICO 生成、favicon 替换、状态管理、缓存刷新 |
+| `shortcut-lib.ps1` | ~130 | 快捷方式写入/体检的唯一实现（bat 防杀软形态 + 图标解析） |
+| `create-desktop-shortcut.ps1` | ~30 | 薄封装：调用共享库在桌面生成快捷方式（幂等） |
+| `selfheal-shortcut.ps1` | ~50 | 自愈：健康体检 → 异常时重建 → 写 selfheal.log |
+| `install-selfheal-task.ps1` | ~60 | 自愈计划任务注册/卸载（当前用户，免管理员） |
+| `switch-dsh-icon.ps1` | ~420 | SVG 渲染、多尺寸 ICO 生成、favicon 替换、状态管理、缓存刷新 |
 
 ### 2.3 运行时产物（不在本目录）
 
@@ -208,6 +220,8 @@ taskbar=deepseek-black     ← 任务栏当前图标名
 | 5 | dist 三件套 `.orig` 备份 | 任何图标修改均可一键回滚出厂；dsh 升级覆盖 dist 后可用 `-Reapply` 重放 |
 | 6 | 内容哈希命名 ico + SHChangeNotify | 双保险规避 Windows 图标缓存 |
 | 7 | 全程日志落盘 `%LOCALAPPDATA%\DSHDesktop` | 无控制台运行时问题仍可追溯 |
+| 8 | `.lnk` 指向入口 bat 而非直接 powershell | 「powershell + ExecutionPolicy Bypass」命令行是恶意 LNK 的经典特征，会被火绒等杀软**静默隔离**（本项目曾因此两次「开机后快捷方式丢失」，见 2026-08-22/23 火绒隔离区记录）。bat 形态 `.lnk` 内容无害，代价仅双击约 0.3 秒控制台闪现；`-DirectPowershell` 可回退旧形态 |
+| 9 | 登录自愈计划任务（延迟 1 分钟） | 即使快捷方式再次被杀软/误操作删除，也在登录后自动重建，把故障窗口压到近乎无感 |
 
 ---
 
@@ -217,8 +231,9 @@ taskbar=deepseek-black     ← 任务栏当前图标名
 
 ```
 ① 双击「创建桌面快捷方式.bat」      —— 仅首次执行，生成桌面图标
-② 双击「DSH桌面版.bat」（或桌面图标） —— 启动 DSH 桌面版
-③ 用完后双击「关闭DSH桌面版.bat」    —— 停止后台服务
+② 双击「安装自愈任务.bat」（推荐）   —— 以后开机自动修复被删的快捷方式
+③ 双击「DSH桌面版.bat」（或桌面图标） —— 启动 DSH 桌面版
+④ 用完后双击「关闭DSH桌面版.bat」    —— 停止后台服务
 ```
 
 ### 4.2 启动器参数参考（start-dsh-desktop.ps1）
@@ -280,6 +295,28 @@ powershell ... -File start-dsh-desktop.ps1 -ChromePath "D:\tools\chrome.exe" -Ma
 彻底还原:     .\switch-dsh-icon.ps1 -Restore
 ```
 
+### 4.4 快捷方式自愈任务
+
+「开机后桌面快捷方式不见了」最常见根因，是杀软把含 powershell 命令行的 `.lnk`
+当作恶意文件**静默隔离**（不进回收站）。快捷方式已改为防杀软的 bat 形态后，
+可再加一道保险——登录自愈：
+
+```text
+双击「安装自愈任务.bat」
+  → 注册当前用户登录触发的计划任务 DshDesktopShortcutSelfHeal
+  → 每次登录 1 分钟后静默体检快捷方式；缺失/损坏则按标准形态自动重建
+```
+
+| 项 | 说明 |
+|---|---|
+| 任务名 | `DshDesktopShortcutSelfHeal` |
+| 触发 | 当前用户登录 + 1 分钟延迟（避开开机杀软扫描高峰） |
+| 权限 | 仅当前用户，无需管理员；重复安装幂等覆盖 |
+| 日志 | `%LOCALAPPDATA%\DSHDesktop\selfheal.log` |
+| 卸载 | 双击「卸载自愈任务.bat」，或 `.\install-selfheal-task.ps1 -Remove` |
+
+> 安装时若安全软件弹窗询问新增计划任务，选择「允许」即可——本任务只做本地体检与重建。
+
 ---
 
 ## 5. 日志与故障排查
@@ -296,6 +333,7 @@ powershell ... -File start-dsh-desktop.ps1 -ChromePath "D:\tools\chrome.exe" -Ma
 
 | 现象 | 可能原因 | 处理方法 |
 |---|---|---|
+| 开机后桌面快捷方式又没了 | 杀软（如火绒）把旧版 powershell 形态 `.lnk` 静默隔离 | 运行「检查环境.bat」看 M11；将 dsh-desktop 加入杀软信任区（火绒：防护中心→信任区）；重跑「创建桌面快捷方式.bat」并安装自愈任务 |
 | 弹窗「找不到 dsh 命令」 | 未安装 DeepSeek Harness 或不在 PATH | 先安装 dsh 并确认 `dsh --help` 可用；或检查 `%USERPROFILE%\.nvmd\bin\dsh.cmd` 是否存在 |
 | 弹窗「无法启动 DSH Web 服务」 | 服务启动超时/崩溃 | 查看 `start.log` 与 `server-*.err.log` 定位 |
 | 三个端口都提示被占用 | 其他程序占用 3080–3082 | 用 `-Ports` 换端口，或排查占用进程 |
@@ -321,9 +359,10 @@ powershell ... -File start-dsh-desktop.ps1 -ChromePath "D:\tools\chrome.exe" -Ma
 **完整卸载步骤**
 
 1. 双击 `关闭DSH桌面版.bat` 停止后台服务；
-2. 删除桌面 `DSH 桌面版.lnk`；
-3. 删除整个 `dsh-desktop\` 目录；
-4. （可选）删除运行时数据：`%LOCALAPPDATA%\DSHDesktop\`。
+2. 双击 `卸载自愈任务.bat` 删除登录计划任务；
+3. 删除桌面 `DSH 桌面版.lnk`；
+4. 删除整个 `dsh-desktop\` 目录；
+5. （可选）删除运行时数据：`%LOCALAPPDATA%\DSHDesktop\`。
 
 > 注意：若曾切换过任务栏图标且未 `-Restore`，请先执行恢复再删除目录，否则前端将保持自定义 favicon 直到下次 dsh 升级覆盖 dist。
 
@@ -349,9 +388,73 @@ powershell ... -File start-dsh-desktop.ps1 -ChromePath "D:\tools\chrome.exe" -Ma
 | 任务栏/窗口图标 | `deepseek-black` |
 | 图标库成员 | `deepseek-black` · `deepseek-blue` · `deepseek-diy` |
 | 当前快捷方式图标文件 | `dsh-icon-5a211dfd.ico` |
+| 快捷方式目标形态 | 指向入口 `DSH桌面版.bat`（防杀软隔离） |
+| 自愈任务 | `DshDesktopShortcutSelfHeal`（登录后 1 分钟体检 + 自动重建） |
 
 ### 7.3 维护备注
 
 - `icons\` 目录为用户自由区，增删图标无需改动任何脚本，切换器自动枚举；
 - `dsh-icon-*.ico` 为生成产物，每次更换桌面图标时旧哈希文件会被自动清理，勿手工引用；
 - `active-icon.txt` 请保持 v2 两行格式（`shortcut=` / `taskbar=` 各占一行），异常时可删除该文件后重新切换一次即可重建。
+
+---
+
+## 8. 环境自检
+
+> 配套脚本：`doctor.ps1`；一键入口：`检查环境.bat`。
+
+### 8.1 使用时机
+
+**当你遇到以下任一情况时，先跑一次自检，再决定怎么修：**
+
+- 电脑启动后，**桌面上的「DSH 桌面版」快捷方式不见了**；
+- 快捷方式还在，但**双击没反应 / 窗口弹不出来**；
+- 图标变成白板（系统默认图标），或启动后报"找不到 dsh / 找不到 Chrome"。
+
+自检默认**纯只读**，不会改动任何文件；只有在显式加 `-Fix` 时才会在逐项确认后尝试修复。
+
+### 8.2 两种用法
+
+```text
+① 双击「检查环境.bat」
+   —— 只读诊断，列出每一项 OK / FAIL / WARN 与证据，不改任何东西（日常首选）
+
+② 命令行带 -Fix（逐项确认后自动修复 error/critical）
+   powershell -NoProfile -ExecutionPolicy Bypass -File doctor.ps1 -Fix
+
+   只看机器可读结果（便于脚本/CI 解析）：
+   powershell -NoProfile -ExecutionPolicy Bypass -File doctor.ps1 -Json
+```
+
+### 8.3 输出解读
+
+表格每行一个检查项，字段含义：
+
+| 字段 | 含义 |
+|---|---|
+| 编号 | 失败模式编号 M01–M15 |
+| 检查项 | 该项诊断的失败模式名称 |
+| 严重度 | `critical` / `error` / `warn` / `info` |
+| 状态 | `OK`（正常）/ `FAIL`（异常，需处理）/ `WARN`（隐患）/ `INFO`（提示） |
+| 证据 / 说明 | FAIL 时给出具体路径或值；`建议:` 行给出可复制的修复命令 |
+
+末尾两行：
+
+- `汇总: X critical / Y error / Z warn / W info` —— 异常项按严重度计数；
+- `待修复清单（按严重度降序）` —— 列出所有异常项，按 critical→error→warn→info 排序，附证据与建议命令。
+
+### 8.4 -Fix 说明
+
+`-Fix` **只对 `error` / `critical` 项**尝试自动修复，且**每项修复前都会 `Read-Host` 确认（y/N）**，输入 `N` 即跳过、不改动任何文件。支持的三类自动修复：
+
+| 修复动作 | 对应模式 | 作用 |
+|---|---|---|
+| 重建快捷方式 | M01 / M02 / M09 / M12 / M15 | 重新生成桌面 `DSH 桌面版.lnk`（调用 `create-desktop-shortcut.ps1`，幂等） |
+| `Unblock-File` 全目录 | M06 | 移除本目录所有文件的 Web 标记（Zone.Identifier），解除 MOTW 静默拦截 |
+| 清理陈旧 `server.pid` | M10 | 删除过期的 PID 记录，避免启动器误判"已在运行" |
+
+> `warn` / `info` 类（如 OneDrive 桌面、portproxy 抢占、图标失效）**不会**被 `-Fix` 自动处理，需按清单中的`建议:`手动处置——这类多为环境/配置选择，不宜脚本擅自改动。
+
+### 8.5 覆盖的失败模式
+
+`doctor.ps1` 覆盖 M01 物理丢失、M02 路径漂移（兼容 bat/powershell 双形态）、M03 图标失效、M04 OneDrive 桌面异常、M05 权限/只读、M06 MOTW 拦截、M07 Explorer 缓存假象、M08 依赖缺失、M09 .lnk 内容损坏（兼容双形态）、M10 启动器自身故障被误认、M11 杀软隔离（扫描 Windows Defender 与火绒两个隔离区；火绒载荷加密，按「近30天 + 大小±64B」启发关联）、M12 多用户混淆、M13 编码错误、M14 portproxy 通配监听抢占、M15 WorkingDirectory 绑定错误，共 15 项。具体构造与期望报告见 `TESTS.md`。
